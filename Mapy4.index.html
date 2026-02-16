@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Overlay Studio Pro - Tryb Terenowy</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; font-family: system-ui, sans-serif; overflow: hidden; background: #020617; }
+        #map { height: 100vh; width: 100%; z-index: 1; }
+        
+        /* Panel Sterowania - Mobilny */
+        .mobile-panel {
+            position: absolute; top: 10px; left: 10px; z-index: 2000;
+            width: 260px; background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px); border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        .panel-hidden { transform: translateX(-220px); opacity: 0.6; }
+
+        /* Przycisk GPS - Duży, do obsługi kciukiem */
+        .gps-btn {
+            position: absolute; bottom: 30px; right: 20px; z-index: 2000;
+            width: 70px; height: 70px; background: #2563eb; color: white;
+            border-radius: 50%; display: flex; align-items: center; justify-content: center;
+            font-size: 32px; box-shadow: 0 8px 25px rgba(37, 99, 235, 0.5);
+            border: 4px solid white; cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .gps-btn:active { transform: scale(0.9); }
+        .gps-tracking { background: #10b981; animation: pulse-gps 2s infinite; }
+
+        @keyframes pulse-gps {
+            0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.6); }
+            70% { box-shadow: 0 0 0 20px rgba(16, 185, 129, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+
+        /* Suwaki */
+        input[type=range] { width: 100%; accent-color: #2563eb; height: 8px; border-radius: 4px; }
+    </style>
+</head>
+<body>
+
+    <div id="map"></div>
+
+    <!-- Pływający Przycisk Lokalizacji -->
+    <div id="gpsTrigger" class="gps-btn" onclick="handleGPS()">🎯</div>
+
+    <!-- Panel Kontrolny -->
+    <div id="mainPanel" class="mobile-panel">
+        <div class="p-4 flex justify-between items-center cursor-pointer border-b border-gray-100" onclick="togglePanel()">
+            <span class="text-[10px] font-black tracking-widest text-slate-500 uppercase">System Nakładki</span>
+            <span id="toggleIcon">◀</span>
+        </div>
+        
+        <div class="p-5 space-y-6">
+            <label class="block w-full bg-blue-600 text-white text-center py-4 rounded-2xl text-xs font-bold shadow-lg active:scale-95 transition-transform cursor-pointer">
+                📂 WYBIERZ PROJEKT (JPG)
+                <input type="file" id="imageInput" accept="image/*" class="hidden">
+            </label>
+
+            <div class="space-y-4">
+                <div class="space-y-2">
+                    <div class="flex justify-between text-[10px] font-bold text-slate-400">
+                        <span>WIDOCZNOŚĆ</span>
+                        <span id="valOp">50%</span>
+                    </div>
+                    <input type="range" id="rangeOp" min="0" max="1" step="0.01" value="0.5">
+                </div>
+
+                <div class="space-y-2">
+                    <div class="flex justify-between text-[10px] font-bold text-slate-400">
+                        <span>SKALA PROJEKTU</span>
+                        <span id="valSc">1.00x</span>
+                    </div>
+                    <input type="range" id="rangeSc" min="0.1" max="5" step="0.01" value="1.0">
+                </div>
+
+                <div class="space-y-2">
+                    <div class="flex justify-between text-[10px] font-bold text-slate-400">
+                        <span>OBRÓT (360°)</span>
+                        <span id="valRo">0°</span>
+                    </div>
+                    <input type="range" id="rangeRo" min="-180" max="180" step="0.5" value="0">
+                </div>
+            </div>
+
+            <button onclick="toggleMapLock()" id="lockBtn" class="w-full py-3 bg-slate-100 text-[11px] font-bold rounded-xl border border-slate-200 text-slate-600 active:bg-slate-200">
+                🔓 MAPA: RUCHOMA
+            </button>
+            
+            <div id="infoBox" class="text-[9px] text-center text-slate-400 leading-tight italic">
+                Jeśli GPS nie startuje, spróbuj otworzyć plik przez przeglądarkę, nie bezpośrednio z folderu "Pobrane".
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Inicjalizacja Mapy z Geoportalu
+        const map = L.map('map', { zoomControl: false, attributionControl: false }).setView([52.23, 21.01], 13);
+        
+        L.tileLayer('https://mapy.geoportal.gov.pl/wss/service/PZGIK/ORTO/WMTS/StandardResolution?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=StandardResolution&STYLE=default&TILEMATRIXSET=EPSG:3857&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&FORMAT=image/jpeg', {
+            maxZoom: 20
+        }).addTo(map);
+
+        let overlay = null;
+        let marker = null;
+        let watchId = null;
+        let isLocked = false;
+        let transform = { r: 0, s: 1 };
+
+        // --- OBSŁUGA GPS ---
+        function handleGPS() {
+            if (watchId) {
+                navigator.geolocation.clearWatch(watchId);
+                watchId = null;
+                document.getElementById('gpsTrigger').classList.remove('gps-tracking');
+                return;
+            }
+
+            if (!navigator.geolocation) {
+                alert("Twój telefon nie wspiera GPS w tej przeglądarce.");
+                return;
+            }
+
+            document.getElementById('gpsTrigger').classList.add('gps-tracking');
+
+            watchId = navigator.geolocation.watchPosition(
+                (pos) => {
+                    const coords = [pos.coords.latitude, pos.coords.longitude];
+                    if (!marker) {
+                        marker = L.circleMarker(coords, {
+                            radius: 12, color: '#fff', fillColor: '#2563eb', fillOpacity: 1, weight: 4
+                        }).addTo(map);
+                        map.setView(coords, 18);
+                    } else {
+                        marker.setLatLng(coords);
+                    }
+                },
+                (err) => {
+                    document.getElementById('gpsTrigger').classList.remove('gps-tracking');
+                    let msg = "Błąd GPS.";
+                    if (err.code === 1) msg = "Odmowa uprawnień. Sprawdź ustawienia prywatności przeglądarki.";
+                    if (window.location.protocol === 'file:') msg += " Tryb 'file://' blokuje GPS na telefonach. Spróbuj wrzucić na Dysk Google i otworzyć przez aplikację 'HTML Viewer'.";
+                    alert(msg);
+                    watchId = null;
+                },
+                { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }
+            );
+        }
+
+        // --- OBSŁUGA OBRAZU ---
+        document.getElementById('imageInput').onchange = (e) => {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                if (overlay) map.removeLayer(overlay);
+                const center = map.getCenter();
+                // 0.001 stopnia to ok. 110 metrów w Polsce
+                overlay = L.imageOverlay(event.target.result, [
+                    [center.lat - 0.001, center.lng - 0.0015],
+                    [center.lat + 0.001, center.lng + 0.0015]
+                ], { interactive: true, zIndex: 1000 }).addTo(map);
+                
+                initOverlayInteractions();
+                updateOverlayTransform();
+            };
+            reader.readAsDataURL(file);
+        };
+
+        function initOverlayInteractions() {
+            const element = overlay.getElement();
+            let dragging = false;
+            let lastPoint = null;
+
+            const onStart = (e) => {
+                if (isLocked) return;
+                L.DomEvent.stopPropagation(e);
+                dragging = true;
+                const p = e.touches ? e.touches[0] : e;
+                lastPoint = map.mouseEventToLatLng(p);
+            };
+
+            const onMove = (e) => {
+                if (!dragging) return;
+                const p = e.touches ? e.touches[0] : e;
+                const currentPoint = map.mouseEventToLatLng(p);
+                const bounds = overlay.getBounds();
+                const dLat = currentPoint.lat - lastPoint.lat;
+                const dLng = currentPoint.lng - lastPoint.lng;
+
+                overlay.setBounds([
+                    [bounds.getSouthWest().lat + dLat, bounds.getSouthWest().lng + dLng],
+                    [bounds.getNorthEast().lat + dLat, bounds.getNorthEast().lng + dLng]
+                ]);
+                lastPoint = currentPoint;
+                updateOverlayTransform();
+            };
+
+            L.DomEvent.on(element, 'mousedown touchstart', onStart);
+            window.addEventListener('mousemove', onMove);
+            window.addEventListener('touchmove', onMove, { passive: false });
+            window.addEventListener('mouseup', () => dragging = false);
+            window.addEventListener('touchend', () => dragging = false);
+        }
+
+        function updateOverlayTransform() {
+            if (!overlay) return;
+            const el = overlay.getElement();
+            if (!el) return;
+            // Zachowujemy pozycję Leaflet (translate) i dodajemy własną rotację/skalę
+            const leafletTransform = el.style.transform.split('rotate')[0].split('scale')[0];
+            el.style.transformOrigin = 'center center';
+            el.style.transform = `${leafletTransform} rotate(${transform.r}deg) scale(${transform.s})`;
+        }
+
+        // --- UI BINDINGS ---
+        document.getElementById('rangeOp').oninput = (e) => {
+            if (overlay) overlay.setOpacity(e.target.value);
+            document.getElementById('valOp').innerText = Math.round(e.target.value * 100) + "%";
+        };
+        document.getElementById('rangeSc').oninput = (e) => {
+            transform.s = e.target.value;
+            document.getElementById('valSc').innerText = parseFloat(e.target.value).toFixed(2) + "x";
+            updateOverlayTransform();
+        };
+        document.getElementById('rangeRo').oninput = (e) => {
+            transform.r = e.target.value;
+            document.getElementById('valRo').innerText = e.target.value + "°";
+            updateOverlayTransform();
+        };
+
+        function togglePanel() {
+            document.getElementById('mainPanel').classList.toggle('panel-hidden');
+            document.getElementById('toggleIcon').innerText = document.getElementById('mainPanel').classList.contains('panel-hidden') ? "▶" : "◀";
+        }
+
+        function toggleMapLock() {
+            isLocked = !isLocked;
+            map.dragging[isLocked ? 'disable' : 'enable']();
+            const btn = document.getElementById('lockBtn');
+            btn.innerText = isLocked ? "🔒 MAPA: ZABLOKOWANA" : "🔓 MAPA: RUCHOMA";
+            btn.classList.toggle('bg-red-500', isLocked);
+            btn.classList.toggle('text-white', isLocked);
+        }
+
+        map.on('zoom', () => requestAnimationFrame(updateOverlayTransform));
+    </script>
+</body>
+</html>
