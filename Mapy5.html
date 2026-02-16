@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Google Maps Overlay Pro</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Biblioteka Google Maps -->
+    <script src="https://maps.googleapis.com/maps/api/js?v=weekly"></script>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #1a1a1a; }
+        #map { height: 100%; width: 100%; }
+        
+        /* Stylizacja interfejsu */
+        .control-panel {
+            position: absolute; top: 10px; left: 10px; z-index: 10;
+            width: 280px; background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px); border-radius: 15px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+            transition: transform 0.3s ease;
+        }
+        .minimized { transform: translateX(-235px); }
+        
+        .gps-fab {
+            position: absolute; bottom: 30px; right: 20px; z-index: 10;
+            width: 65px; height: 65px; background: #4285F4; color: white;
+            border-radius: 50%; border: 4px solid white; font-size: 28px;
+            display: flex; align-items: center; justify-content: center;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3); cursor: pointer;
+        }
+        .tracking { background: #34A853; animation: pulse 2s infinite; }
+        
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(52, 168, 83, 0.7); }
+            70% { box-shadow: 0 0 0 15px rgba(52, 168, 83, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(52, 168, 83, 0); }
+        }
+
+        .custom-overlay {
+            position: absolute;
+            cursor: move;
+            pointer-events: auto;
+            transform-origin: center center;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="map"></div>
+
+    <!-- Przycisk lokalizacji Google Style -->
+    <div id="gpsBtn" class="gps-fab" onclick="findMe()">🎯</div>
+
+    <!-- Panel Sterowania -->
+    <div id="uiPanel" class="control-panel">
+        <div class="p-3 bg-slate-100 rounded-t-15 flex justify-between items-center cursor-pointer" onclick="toggleUI()">
+            <span class="font-bold text-[10px] text-slate-600 tracking-wider">GOOGLE MAPS OVERLAY</span>
+            <span id="chevron">◀</span>
+        </div>
+        
+        <div class="p-5 space-y-5">
+            <label class="block w-full bg-blue-600 text-white text-center py-3 rounded-xl text-xs font-bold cursor-pointer hover:bg-blue-700 transition-colors">
+                📂 WCZYTAJ PROJEKT JPG
+                <input type="file" id="imgUpload" accept="image/*" class="hidden">
+            </label>
+
+            <div class="space-y-4">
+                <div>
+                    <div class="flex justify-between text-[10px] font-bold text-slate-400 mb-2">PRZEZROCZYSTOŚĆ <span id="txtOp">50%</span></div>
+                    <input type="range" id="rngOp" min="0" max="1" step="0.01" value="0.5" class="w-full accent-blue-600">
+                </div>
+                <div>
+                    <div class="flex justify-between text-[10px] font-bold text-slate-400 mb-2">SKALA <span id="txtSc">1.00x</span></div>
+                    <input type="range" id="rngSc" min="0.1" max="5" step="0.01" value="1.0" class="w-full accent-blue-600">
+                </div>
+                <div>
+                    <div class="flex justify-between text-[10px] font-bold text-slate-400 mb-2">OBRÓT <span id="txtRo">0°</span></div>
+                    <input type="range" id="rngRo" min="-180" max="180" step="0.1" value="0" class="w-full accent-blue-600">
+                </div>
+            </div>
+
+            <button onclick="toggleLock()" id="lockBtn" class="w-full py-2 bg-slate-50 text-[10px] font-bold rounded-lg border border-slate-200">
+                🔓 RUCH MAPY: TAK
+            </button>
+        </div>
+    </div>
+
+    <script>
+        let map;
+        let googleOverlay = null;
+        let marker = null;
+        let isLocked = false;
+        let currentTransform = { rotate: 0, scale: 1 };
+
+        // 1. Inicjalizacja Mapy Google
+        function initMap() {
+            map = new google.maps.Map(document.getElementById("map"), {
+                zoom: 15,
+                center: { lat: 52.23, lng: 21.01 },
+                mapTypeId: "satellite",
+                disableDefaultUI: true,
+                gestureHandling: "greedy" // lepsze dla mobile
+            });
+        }
+
+        // 2. Funkcja GPS
+        function findMe() {
+            if (navigator.geolocation) {
+                document.getElementById('gpsBtn').classList.add('tracking');
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        const pos = {
+                            lat: position.coords.latitude,
+                            lng: position.coords.longitude,
+                        };
+                        map.setCenter(pos);
+                        map.setZoom(19);
+                        
+                        if (marker) marker.setMap(null);
+                        marker = new google.maps.Marker({
+                            position: pos,
+                            map: map,
+                            icon: {
+                                path: google.maps.SymbolPath.CIRCLE,
+                                scale: 10,
+                                fillColor: "#4285F4",
+                                fillOpacity: 1,
+                                strokeColor: "white",
+                                strokeWeight: 3,
+                            }
+                        });
+                        document.getElementById('gpsBtn').classList.remove('tracking');
+                    },
+                    () => alert("Błąd: Nie udało się pobrać lokalizacji. Sprawdź HTTPS."),
+                    { enableHighAccuracy: true }
+                );
+            }
+        }
+
+        // 3. Własny system Overlay dla Google Maps
+        class CustomOverlay extends google.maps.OverlayView {
+            constructor(bounds, image, map) {
+                super();
+                this.bounds_ = bounds;
+                this.image_ = image;
+                this.map_ = map;
+                this.div_ = null;
+                this.setMap(map);
+            }
+
+            onAdd() {
+                this.div_ = document.createElement("div");
+                this.div_.className = "custom-overlay";
+                const img = document.createElement("img");
+                img.src = this.image_;
+                img.style.width = "100%";
+                img.style.height = "100%";
+                img.style.position = "absolute";
+                this.div_.appendChild(img);
+                this.div_.style.opacity = document.getElementById('rngOp').value;
+
+                const panes = this.getPanes();
+                panes.overlayLayer.appendChild(this.div_);
+                
+                this.addEvents();
+            }
+
+            draw() {
+                const overlayProjection = this.getProjection();
+                const sw = overlayProjection.fromLatLngToDivPixel(this.bounds_.getSouthWest());
+                const ne = overlayProjection.fromLatLngToDivPixel(this.bounds_.getNorthEast());
+
+                if (this.div_) {
+                    this.div_.style.left = sw.x + "px";
+                    this.div_.style.top = ne.y + "px";
+                    this.div_.style.width = ne.x - sw.x + "px";
+                    this.div_.style.height = sw.y - ne.y + "px";
+                    this.applyTransform();
+                }
+            }
+
+            applyTransform() {
+                if (this.div_) {
+                    this.div_.style.transform = `rotate(${currentTransform.rotate}deg) scale(${currentTransform.scale})`;
+                }
+            }
+
+            addEvents() {
+                let isDragging = false;
+                let startPos = null;
+
+                const onStart = (e) => {
+                    if (isLocked) return;
+                    isDragging = true;
+                    const p = e.touches ? e.touches[0] : e;
+                    startPos = { x: p.clientX, y: p.clientY };
+                    map.setOptions({ draggable: false });
+                };
+
+                const onMove = (e) => {
+                    if (!isDragging) return;
+                    const p = e.touches ? e.touches[0] : e;
+                    const dx = p.clientX - startPos.x;
+                    const dy = p.clientY - startPos.y;
+
+                    const proj = this.getProjection();
+                    const swPx = proj.fromLatLngToDivPixel(this.bounds_.getSouthWest());
+                    const nePx = proj.fromLatLngToDivPixel(this.bounds_.getNorthEast());
+
+                    const newSw = proj.fromDivPixelToLatLng(new google.maps.Point(swPx.x + dx, swPx.y + dy));
+                    const newNe = proj.fromDivPixelToLatLng(new google.maps.Point(nePx.x + dx, nePx.y + dy));
+
+                    this.bounds_ = new google.maps.LatLngBounds(newSw, newNe);
+                    startPos = { x: p.clientX, y: p.clientY };
+                    this.draw();
+                };
+
+                const onEnd = () => {
+                    isDragging = false;
+                    if (!isLocked) map.setOptions({ draggable: true });
+                };
+
+                this.div_.addEventListener('mousedown', onStart);
+                this.div_.addEventListener('touchstart', onStart);
+                window.addEventListener('mousemove', onMove);
+                window.addEventListener('touchmove', onMove, {passive: false});
+                window.addEventListener('mouseup', onEnd);
+                window.addEventListener('touchend', onEnd);
+            }
+
+            onRemove() {
+                if (this.div_) {
+                    this.div_.parentNode.removeChild(this.div_);
+                    this.div_ = null;
+                }
+            }
+        }
+
+        // 4. Obsługa Plików
+        document.getElementById('imgUpload').onchange = (e) => {
+            const file = e.target.files[0];
+            const reader = new FileReader();
+            reader.onload = (ev) => {
+                const center = map.getCenter();
+                const bounds = new google.maps.LatLngBounds(
+                    new google.maps.LatLng(center.lat() - 0.001, center.lng() - 0.001),
+                    new google.maps.LatLng(center.lat() + 0.001, center.lng() + 0.001)
+                );
+                if (googleOverlay) googleOverlay.setMap(null);
+                googleOverlay = new CustomOverlay(bounds, ev.target.result, map);
+            };
+            reader.readAsDataURL(file);
+        };
+
+        // 5. Kontrolki Panelu
+        document.getElementById('rngOp').oninput = (e) => {
+            if (googleOverlay && googleOverlay.div_) googleOverlay.div_.style.opacity = e.target.value;
+            document.getElementById('txtOp').innerText = Math.round(e.target.value*100) + "%";
+        };
+        document.getElementById('rngSc').oninput = (e) => {
+            currentTransform.scale = e.target.value;
+            if (googleOverlay) googleOverlay.applyTransform();
+            document.getElementById('txtSc').innerText = parseFloat(e.target.value).toFixed(2) + "x";
+        };
+        document.getElementById('rngRo').oninput = (e) => {
+            currentTransform.rotate = e.target.value;
+            if (googleOverlay) googleOverlay.applyTransform();
+            document.getElementById('txtRo').innerText = e.target.value + "°";
+        };
+
+        function toggleUI() {
+            document.getElementById('uiPanel').classList.toggle('minimized');
+            document.getElementById('chevron').innerText = document.getElementById('uiPanel').classList.contains('minimized') ? "▶" : "◀";
+        }
+
+        function toggleLock() {
+            isLocked = !isLocked;
+            map.setOptions({ draggable: !isLocked, scrollwheel: !isLocked, disableDoubleClickZoom: isLocked });
+            const btn = document.getElementById('lockBtn');
+            btn.innerText = isLocked ? "🔒 RUCH MAPY: NIE" : "🔓 RUCH MAPY: TAK";
+            btn.className = `w-full py-2 text-[10px] font-bold rounded-lg border ${isLocked ? 'bg-red-500 text-white' : 'bg-slate-50'}`;
+        }
+
+        window.onload = initMap;
+    </script>
+</body>
+</html>
